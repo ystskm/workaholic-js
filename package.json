@@ -1,0 +1,29 @@
+{
+  "name": "workaholic-js",
+  "version": "0.0.2",
+  "author": {
+    "name": "Yoshitaka Sakamoto",
+    "url": "http://github.com/ystskm",
+    "email": "sakamoto@startup-cloud.co.jp"
+  },
+  "contributors": [],
+  "description": "web-worker API for multi thread programming on browser",
+  "dependencies": {
+  },
+  "devDependencies": {
+    "foonyah-ci": "*"
+  },
+  "keywords": ["util","web-worker","promise"],
+  "main": "workaholic.js",
+  "repository": {
+    "url": "https://github.com/ystskm/workaholic-js.git",
+    "type": "git"
+  },
+  "license": "MIT",
+  "engine": {
+    "node": ">=0.10.0"
+  },
+  "scripts": {
+    "test": "node test/_runner.js"
+  }
+}
