@@ -42,6 +42,9 @@
   // WorkersWaitingPlace
   let WP_protos = {
 
+    supportOffscreen: ()=>{
+      return isFunction(document.createElement('canvas').transferControlToOffscreen);
+    },
     setDebug: WP_setDebug,
     add: WP_add,
     del: WP_del,
@@ -200,7 +203,7 @@
   function WP_share(point, no) {
     
     var wp = this, wp_opts = wp.options, wkrs = wp.stack;
-    var wo = wkrs[ no ];
+    var wo = wkrs[ no = no || 1 ];
     if(wo == NULL) throw 'Worker #' + no + ' is not found';
     return wo.points += (point || 0);
     
@@ -208,7 +211,7 @@
   function WP_owe(func, no) {
 
     var wp = this, wp_opts = wp.options, wkrs = wp.stack;
-    var wo = wkrs[ no ];
+    var wo = wkrs[ no = no || 1 ];
     if(wo == NULL) return Promise.reject('Worker #' + no + ' is not found');
     return wo.op(func);
 
@@ -266,7 +269,7 @@
       var g = typeof self == 'undefined' ? this: self;
 
       // Define debug
-      var DEBUG = FALSE, WORKER_NO = NULL, OFFSCREENS = { }, SHARE_BOX = { };
+      var DEBUG = FALSE, WORKER_NO = NULL, OFFSCREENS = { }, SHARE_BOX = { draws: { }, goals: { } };
       var debug = function() {
         if(!DEBUG) { return; }
         var args = casting(arguments);
@@ -284,11 +287,11 @@
       g.addEventListener('message', function(evt) {
         var s = Date.now();
         var data = evt.data, r_id = data.id, r_type = _evtType(data.type);
-        var r_func, r_args;
+        var r_func, r_args, r_exec = ()=>isFunction(r_func) ? r_func.apply(g, r_args.concat(SHARE_BOX, OFFSCREENS)): r_func;
         // console.log('message@Worker');
         debug('received event: #' + r_id, evt);
         return Promise.resolve().then(function() {
-          var v;
+          var k, v;
           switch(data.type) {
 
           case 'setDebug':
@@ -313,7 +316,7 @@
             return;
                   
             // ----- APIS ----- //
-            // (1) keys / self + define, (2) import / importScripts, (3) eval / script
+            // (1) keys / self (2) defs / define (3) exec / execute (4) import / importScripts (5) eval / script
           case 'keys':
           case 'self':
             v = data.src || data.value || data.key;
@@ -321,6 +324,8 @@
             default:
               return v == NULL ? Object.keys(self): self[ v ];
             }
+            
+          case 'defs':
           case 'define':
             v = data.src || data.value || data.key;
             switch(v) {
@@ -328,33 +333,65 @@
               return v == NULL ? Object.keys(SHARE_BOX): SHARE_BOX[ v ];
             }
 
+          case 'exec':
+          case 'execute':
+            // SHARE_BOX にセットした関数を保持する
+            k = data.src || data.value || data.script;
+            r_args = [ ].concat(data.args || [ ]);
+            r_func = SHARE_BOX[ k ];
+            return r_exec();
+            
+          case 'kick':
+          case 'animation':
+            // SHARE_BOX.draws, SHARE_BOX.goals に登録している関数でアニメーションさせる
+            if(animQueue.timer != NULL) return;
+            animQueue.draws = SHARE_BOX[ data.draws || 'draws' ];
+            animQueue.goals = SHARE_BOX[ data.goals || 'goals' ];
+            animQueue();
+            return;
+
           case 'import':
           case 'importScripts':
             v = [ ].concat(data.src || data.value || data.urls).map(uri=>{
 
-              if(/^(https?|blob):/.test(uri) || data.origin == NULL) return uri;
+              if(/^(https?|blob):/.test(uri) || data.origin == NULL) { return uri; }
               return [ data.origin, uri.substr(uri.charAt(0) == '/' ? 1: 0) ].join('/');
 
             });
             return importScripts.apply(self, v);
-
+          
           case 'eval':
           case 'script':
           default:
             v = data.src || data.value || data.script;
             try {
-              r_args = [ ].concat(data.args || [ ]);
+              r_args = [ ].concat(data.args === UNDEF ? [ ]: data.args);
               r_func = eval('(' + v + ')'); 
                 // for Object and Function
             } catch(e) {
               r_func = eval('(function(' + r_args.map( (d, i)=>'a' + i ).concat('SHARE_BOX', 'OFFSCREENS').join(',') + ') { ' + v + ' })'); 
                 // for Script
             }
-            if(data[ 'define' ]) {
+            switch(TRUE) {
+
+            case is('string', data[ 'define' ]):
               SHARE_BOX[ data[ 'define' ] ] = r_func;
               return data[ 'define' ];
-            } else {
-              return typeof r_func == 'function' ? r_func.apply(g, r_args.concat(SHARE_BOX, OFFSCREENS)): r_func;
+
+            case is('string', data['draws']):
+              SHARE_BOX.draws[ data['draws'] ] = r_func;
+              return data['draws'];
+            case is('string', data['goals']):
+              SHARE_BOX.goals[ data['goals'] ] = r_func;
+              return data['goals'];
+
+            case is('string', data[ 'global' ]):
+              g[ data[ 'global' ] ] = r_func;
+              return data[ 'global' ];
+
+            default:
+              return r_exec();
+
             }
 
           }
@@ -383,6 +420,8 @@
         });
       });
       // <-- g.addEventListener('message', function(evt) { ... }; <--
+      
+      // ----- //
       function _evtType(m_ty) {
         switch(m_ty) {
 
@@ -393,6 +432,16 @@
 
         }
       }
+      function animQueue() {
+        if(Object.values(animQueue.goals).filter(goalFunc=>goalFunc(SHARE_BOX) === FALSE).length === 0) {
+          cancelAnimationFrame(animQueue.timer);
+          animQueue.timer = NULL;
+          return;
+        }
+        Object.values(animQueue.draws).forEach( darwFunc=>darwFunc(SHARE_BOX, OFFSCREENS) );
+        animQueue.timer = requestAnimationFrame(animQueue);
+      }
+
       // ----- //
       function casting(a) {
         return Array.prototype.slice.call(a);
@@ -528,15 +577,26 @@
           src: message
         };
       }
-      if(isFunction(message.src)) {
-        message.src = funcStringify(message.src);
+      ['src', 'script', 'value'].forEach(k=>{
+        if(isFunction(message[ k ])) message[ k ] = funcStringify(message[ k ]);
+      });
+ 
+      // Substitute type
+      if(message.type == NULL) {
+        switch(TRUE) {
+        case message.canvas != NULL:
+          message.type = 'canvas'; break;
+        case message.define != NULL:
+          message.type = 'script'; break;
+        }
       }
 
       // TODO setTimeout for operation timeout
-      var id = message.id = wo._seq = (wo._seq + 1) & 0xffff;
+      let id = message.id = wo._seq = (wo._seq + 1) & 0xffff;
+      let offscreen;
       message.origin = G_origin;
       cbs[id] = (evt, data)=>{
-        wo.debug('Op.response:', evt, data);
+        wo.debug('Op.responseCallback:', evt, data);
         switch(data.type) {
         case 'ready':
           return rsl(data);
@@ -550,8 +610,8 @@
       wo.debug('Op.postMessage:', message);
       switch(message.type) {
       case 'canvas':
-        message.canvas.transferControlToOffscreen();
-        return ww.postMessage(message, [ message.canvas ]);
+        offscreen = message.canvas = message.canvas.transferControlToOffscreen();
+        return ww.postMessage(message, [ offscreen ]);
       default:
         return ww.postMessage(message);
       }
