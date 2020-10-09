@@ -1,6 +1,7 @@
 {
   "name": "workaholic-js",
-  "version": "0.0.3",
+  "version": "0.1.0",
+  "revision": "r20201009.1047j",
   "author": {
     "name": "Yoshitaka Sakamoto",
     "url": "http://github.com/ystskm",
