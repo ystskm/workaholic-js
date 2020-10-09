@@ -2,17 +2,29 @@
  * [workaholic.js] web-worker API for multi thread programming on browser
  * web-worker に次々と仕事を渡したい人の Promise ベース API
  * (usage)
+ 
    var w = Workers();
-   // [by workers]
-   var s = Date.now(); Promise.resolve().then(()=>w.cmd( ()=>1 + 1000 )).then(r=>console.log('OK', Date.now() - s, r));
-   // [by display]
-   var s = Date.now(); Promise.resolve().then(()=>1 + 1000).then(r=>console.log('OK', Date.now() - s, r));
-   It tooks 1~2ms to pass any operation to tunnel to a worker. It means that worker should owe ONLY some BATCH process which hangs
+   // for Compare:[by workers] ... NO DISPLAY FREEZE
+   var s = Date.now(); Promise.resolve().then(()=>w.cmd({ var i = 0; while(i < 10000000000) i += 1; return i; })
+     .then(r=>console.log('OK', Date.now() - s + 'ms', r));
+   // for Compare:[by on-display] ... DISPLAY FREEZE
+   var s = Date.now(); Promise.resolve().then(()=>{ var i = 0; while(i < 10000000000) i += 1; return i; })
+     .then(r=>console.log('OK', Date.now() - s + 'ms', r));
+
+   * It tooks 1~2ms to pass any operation to tunnel to a worker. It means that worker should owe ONLY some BATCH process which hangs
    user operation.
+   e.g.) var a = Date.now(); G_workers.all(()=>1 + 1).then(rd=>console.log('DONE', rd, Date.now() - a + 'ms')) // ~5ms
+
+   * Although, it worth that any synchronous process is NOT STUCK DISPLAY AT ALL.
+   var a = Date.now(); G_workers.cmd(()=>{ var i = 0; while(i < 10000000000) i += 1; return i; }).then(rd=>console.log('DONE', rd, Date.now() - a + 'ms')); // ~12sec
+   var a = Date.now(); G_workers.all(()=>{ var i = 0; while(i < 10000000000) i += 1; return i; }).then(rd=>console.log('DONE', rd, Date.now() - a + 'ms')); // ~25sec
+   * But as show in above, unfortunately, multi-worker working grows cost gradually
+
    // To debug mode
    w.setDebug('ISO');
    // Off
    w.setDebug(0);
+   
  */
 (function(has_win, has_mod) {
   
@@ -29,13 +41,22 @@
   
   // WorkersWaitingPlace
   let WP_protos = {
+
     setDebug: WP_setDebug,
     add: WP_add,
     del: WP_del,
     cmd: WP_cmd,
+    all: WP_all,
+    def: WP_def,
+    
+    share: WP_share,
+    owe: WP_owe,
+    
     seek: WP_seek,
     free: WP_free,
+    importScript: WP_importScript,
     close: WP_close
+    
   };
   Object.keys(WP_protos).forEach(k=>WorkersWaitingPlace.prototype[k] = WP_protos[k]);
   
@@ -76,6 +97,7 @@
     }
     console.log.apply(console, args);
   };
+  let G_origin = location.origin;
   /**
    * @class WorkersWaitingPlace
    */
@@ -110,7 +132,7 @@
   function WP_add() {
 
     var wp = this, wp_opts = wp.options, wkrs = wp.stack;
-    var wo = new OneWorker(wp_opts.worker_options);
+    var wo = new OneWorker(wp_opts);
     var no = wo.no;
     wkrs[ no ] = wo;
     return wo.ready();
@@ -121,7 +143,7 @@
     var wp = this, wp_opts = wp.options, wkrs = wp.stack;
     var no = wo.no, cbs = wo._callbacks;
     return wo.ready().then(()=>{
-      if(Object.keys(cbs).length) {
+      if(Object.keys(cbs).length == 0) {
         wo._tobeDelete = TRUE;
         return;
       }
@@ -133,14 +155,20 @@
     });
 
   }
-  function WP_close() {
-
+  function WP_importScript(uris) {
+    
     var wp = this, wp_opts = wp.options, wkrs = wp.stack;
     var when = Promise.resolve();
     Object.values(wkrs).forEach(wo=>{
-      when = when.then(()=>wp.del(wo));
+      when = when.then(()=>wp.op({ type: 'importScripts' }));
     });
     return when;
+   
+  }
+  function WP_close() {
+
+    var wp = this, wp_opts = wp.options, wkrs = wp.stack;
+    return Promise.all( Object.values(wkrs).map(wo=>wp.del(wo)) );
 
   }
   function WP_cmd(func, point) {
@@ -155,6 +183,34 @@
     }).then(()=>{
       return wp.free(point, wo);
     }).then(()=>rd);
+
+  }
+  function WP_all(func) {
+
+    var wp = this, wp_opts = wp.options, wkrs = wp.stack;
+    return Promise.all( Object.values(wkrs).map(wo=>wo.op(func)) );
+
+  }
+  function WP_def(name, data) {
+
+    var wp = this;
+    return wp.all({ define: name, value: data });
+
+  }
+  function WP_share(point, no) {
+    
+    var wp = this, wp_opts = wp.options, wkrs = wp.stack;
+    var wo = wkrs[ no ];
+    if(wo == NULL) throw 'Worker #' + no + ' is not found';
+    return wo.points += (point || 0);
+    
+  }
+  function WP_owe(func, no) {
+
+    var wp = this, wp_opts = wp.options, wkrs = wp.stack;
+    var wo = wkrs[ no ];
+    if(wo == NULL) return Promise.reject('Worker #' + no + ' is not found');
+    return wo.op(func);
 
   }
   function WP_seek(point, n) {
@@ -208,8 +264,9 @@
       // Define global
       var NULL = null, TRUE = true, FALSE = false, UNDEF = undefined;
       var g = typeof self == 'undefined' ? this: self;
+
       // Define debug
-      var DEBUG = FALSE, WORKER_NO = NULL;
+      var DEBUG = FALSE, WORKER_NO = NULL, OFFSCREENS = { }, SHARE_BOX = { };
       var debug = function() {
         if(!DEBUG) { return; }
         var args = casting(arguments);
@@ -226,43 +283,84 @@
       // { data: { id:, type:, src:, ... } } => { data: { id:, type:, reslut: } } / { data: { id:, type:, errmsg: } }
       g.addEventListener('message', function(evt) {
         var s = Date.now();
-        var data = evt.data, r_id = data.id, r_type = _evtType(data.type), r_func;
+        var data = evt.data, r_id = data.id, r_type = _evtType(data.type);
+        var r_func, r_args;
         // console.log('message@Worker');
-        debug('received event:', r_id, r_type);
+        debug('received event: #' + r_id, evt);
         return Promise.resolve().then(function() {
+          var v;
           switch(data.type) {
 
           case 'setDebug':
-            return data.value == NULL ? DEBUG: (DEBUG = data.value);
-            
+            v = data.value;
+            return v == NULL ? DEBUG: (DEBUG = v);
+          case 'debugger':
+            return eval('debugger;');
+
           case 'connect':
-            // TODO
+            v = data.no;
             return new Promise(function(rsl, rej) {
               try {
-                WORKER_NO = data.no;
+                WORKER_NO = v;
                 rsl();
               } catch(e) {
                 g.$S.on('ready', rsl).on('error', rej);
               }
             });
+          case 'canvas':
+            v = data.canvas;
+            OFFSCREENS[ data.offscreen_name || '_' ] = v;
+            return;
+                  
+            // ----- APIS ----- //
+            // (1) keys / self + define, (2) import / importScripts, (3) eval / script
+          case 'keys':
+          case 'self':
+            v = data.src || data.value || data.key;
+            switch(v) {
+            default:
+              return v == NULL ? Object.keys(self): self[ v ];
+            }
+          case 'define':
+            v = data.src || data.value || data.key;
+            switch(v) {
+            default:
+              return v == NULL ? Object.keys(SHARE_BOX): SHARE_BOX[ v ];
+            }
 
           case 'import':
-            return importScripts([ ].concat(data.src));
+          case 'importScripts':
+            v = [ ].concat(data.src || data.value || data.urls).map(uri=>{
+
+              if(/^(https?|blob):/.test(uri) || data.origin == NULL) return uri;
+              return [ data.origin, uri.substr(uri.charAt(0) == '/' ? 1: 0) ].join('/');
+
+            });
+            return importScripts.apply(self, v);
 
           case 'eval':
           case 'script':
           default:
+            v = data.src || data.value || data.script;
             try {
-              r_func = eval('(' + data.src + ')'); // for Object and Function
+              r_args = [ ].concat(data.args || [ ]);
+              r_func = eval('(' + v + ')'); 
+                // for Object and Function
             } catch(e) {
-              r_func = eval('(function(){ ' + data.src + ' })'); // for Script
+              r_func = eval('(function(' + r_args.map( (d, i)=>'a' + i ).concat('SHARE_BOX', 'OFFSCREENS').join(',') + ') { ' + v + ' })'); 
+                // for Script
             }
-            return typeof r_func == 'function' ? r_func.call(g): r_func;
+            if(data[ 'define' ]) {
+              SHARE_BOX[ data[ 'define' ] ] = r_func;
+              return data[ 'define' ];
+            } else {
+              return typeof r_func == 'function' ? r_func.apply(g, r_args.concat(SHARE_BOX, OFFSCREENS)): r_func;
+            }
 
           }
         }).then(function(r) {
 
-          debug('complete process:', Date.now() - s, r_id, r_type, r_func);
+          debug('complete process: #' + r_id, Date.now() - s + 'ms', r_type, r_func);
           postMessage({
             "id": r_id,
             "type": r_type,
@@ -273,7 +371,7 @@
         })['catch'](function(e) {
 
           e = e || 'evaluated failure.';
-          debug('failure process:', Date.now() - s, r_id, r_type, r_func, e);
+          debug('failure process: #' + r_id, Date.now() - s + 'ms', r_type, r_func, e);
           postMessage({
             "id": r_id,
             "type": "error",
@@ -313,7 +411,12 @@
 
     var src = funcStringify(importScript);
     if(isArray(wo_opts.importScripts)) {
-      src = [ 'importScripts("' + wo_opts.importScripts.join('","') + '");', src ].join("\n");
+      src = [ 'importScripts("' + wo_opts.importScripts.map(uri=>{
+
+        if( /^(https?|blob):/.test(uri) ) { return uri; }
+        return [ G_origin, uri.substr(uri.charAt(0) == '/' ? 1: 0) ].join('/');
+
+      }).join('",\n"') + '");', src ].join("\n");
     }
     wo._worker = new Worker(URL.createObjectURL(new Blob([ src ], {
       type: 'text/javascript'
@@ -431,6 +534,7 @@
 
       // TODO setTimeout for operation timeout
       var id = message.id = wo._seq = (wo._seq + 1) & 0xffff;
+      message.origin = G_origin;
       cbs[id] = (evt, data)=>{
         wo.debug('Op.response:', evt, data);
         switch(data.type) {
@@ -444,7 +548,13 @@
         }
       };
       wo.debug('Op.postMessage:', message);
-      ww.postMessage(message);
+      switch(message.type) {
+      case 'canvas':
+        message.canvas.transferControlToOffscreen();
+        return ww.postMessage(message, [ message.canvas ]);
+      default:
+        return ww.postMessage(message);
+      }
 
     }));
   }
