@@ -1,6 +1,7 @@
 /**
  * [workaholic.js] web-worker API for multi thread programming on browser
  * web-worker に次々と仕事を渡したい人の Promise ベース API
+ * RSD_ID: 4o2P77lR
  * (usage)
  
    var w = Workers();
